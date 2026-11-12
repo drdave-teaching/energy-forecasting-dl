@@ -50,7 +50,7 @@ ENERGY_PREFIX = os.getenv("ENERGY_PREFIX", "energy")
 MODEL_KEY = f"{ENERGY_PREFIX}/models/model.keras"
 CARD_KEY = f"{ENERGY_PREFIX}/models/model_card.json"
 # the class HRRR file, rewritten every hour at :05 by Dr. Dave's hrrr-bdl job (8 newest runs, 0-48 hours ahead)
-HRRR_RUNS_URL = os.getenv("HRRR_RUNS_URL", "https://storage.googleapis.com/opim5512-leaderboard-f26/weather/bdl_hrrr_runs.csv")
+HRRR_RUNS_URL = os.getenv("HRRR_RUNS_URL", "https://storage.googleapis.com/opim5509-dl-leaderboard-f26/weather/bdl_hrrr_runs.csv")
 HRRR_MAX_AGE_HOURS = 14        # newest run older than this = something is wrong upstream: use the NWS forecast instead
 MAX_FILLED_LOAD_HOURS = 24     # more missing hours than this in the past week = the load data is broken, do not guess
 WEATHER_KEY = f"{ENERGY_PREFIX}/datasets/bdl_weather_forecast_master.csv"
