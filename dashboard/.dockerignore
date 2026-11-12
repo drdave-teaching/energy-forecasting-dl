@@ -1,0 +1,5 @@
+# Never copy keys or local settings into the container
+.streamlit/
+*.json
+*-key.json
+__pycache__/

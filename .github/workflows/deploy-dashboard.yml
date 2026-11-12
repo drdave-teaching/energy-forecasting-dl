@@ -1,0 +1,137 @@
+name: Deploy dashboard (Cloud Run)
+# YOUR forecast dashboard as a public web page on Google Cloud Run (OPIM 5509 final project, optional).
+# It only READS your bucket. Turn it on by adding the repository variable DASHBOARD_NICKNAME
+# (your leaderboard nickname), then run this workflow from the Actions tab. After that, every change
+# you push to dashboard/ redeploys it.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'dashboard/**'
+      - '.github/workflows/deploy-dashboard.yml'
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID: ${{ vars.PROJECT_ID }}
+  REGION: ${{ vars.REGION }}
+  BUCKET_NAME: ${{ vars.BUCKET_NAME }}
+  RUNTIME_SA: ${{ vars.RUNTIME_SA }}
+  DEPLOYER_SA: ${{ vars.DEPLOYER_SA }}
+  WORKLOAD_IDENTITY_PROVIDER: ${{ vars.WORKLOAD_IDENTITY_PROVIDER }}
+  NICKNAME: ${{ vars.DASHBOARD_NICKNAME }}
+  SERVICE_NAME: energy-dashboard
+  SOURCE_DIR: dashboard
+
+jobs:
+  deploy:
+    # Deploys only from YOUR fork (the course repo has no Google Cloud project behind it)
+    if: github.repository_owner != 'drdave-teaching'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Is the dashboard turned on?
+        id: gate
+        shell: bash
+        run: |
+          if [[ -z "${NICKNAME}" ]]; then
+            echo "on=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Dashboard is off. To turn it on: Settings > Secrets and variables > Actions > Variables > New repository variable DASHBOARD_NICKNAME = your leaderboard nickname, then run this workflow again."
+          else
+            echo "on=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.on == 'true'
+
+      - name: Auth (WIF)
+        if: steps.gate.outputs.on == 'true'
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.DEPLOYER_SA }}
+
+      - name: Setup gcloud
+        if: steps.gate.outputs.on == 'true'
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Pick an image folder (Artifact Registry)
+        if: steps.gate.outputs.on == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Use a 'dashboard' repository if you made one; otherwise the 'gcf-artifacts' one your Cloud Functions already use.
+          REPO=""
+          for CANDIDATE in dashboard gcf-artifacts; do
+            if gcloud artifacts repositories describe "${CANDIDATE}" --location="${REGION}" >/dev/null 2>&1; then
+              REPO="${CANDIDATE}"
+              break
+            fi
+          done
+          if [[ -z "${REPO}" ]]; then
+            echo "::error::No Artifact Registry repository found. In Cloud Shell (your energy project) run once:"
+            echo "gcloud artifacts repositories create dashboard --repository-format=docker --location=${REGION}"
+            exit 1
+          fi
+          echo "IMAGE=${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/${SERVICE_NAME}:${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          echo "Image folder: ${REPO}"
+
+      - name: Build and push the container
+        if: steps.gate.outputs.on == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker build -t "${IMAGE}" "${SOURCE_DIR}"
+          docker push "${IMAGE}"
+
+      - name: Deploy to Cloud Run (public page, scales to zero)
+        if: steps.gate.outputs.on == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          retry() { local n=1; until "$@"; do if [ "$n" -ge 5 ]; then return 1; fi; echo "::warning::Attempt $n failed. Retrying in $((n*20))s..."; sleep $((n*20)); n=$((n+1)); done; }
+          python3 - <<'PY'
+          import json, os
+          env = {"ENERGY_BUCKET": os.environ["BUCKET_NAME"], "DASHBOARD_NICKNAME": os.environ["NICKNAME"]}
+          json.dump(env, open("/tmp/dash_env.json", "w"))
+          PY
+          retry gcloud run deploy "${SERVICE_NAME}" \
+            --image="${IMAGE}" \
+            --region="${REGION}" \
+            --service-account="${RUNTIME_SA}" \
+            --allow-unauthenticated \
+            --cpu=1 \
+            --memory=1Gi \
+            --min-instances=0 \
+            --max-instances=2 \
+            --concurrency=20 \
+            --session-affinity \
+            --timeout=3600 \
+            --env-vars-file=/tmp/dash_env.json
+          URL="$(gcloud run services describe "${SERVICE_NAME}" --region="${REGION}" --format='value(status.url)')"
+          echo "Your dashboard: ${URL}"
+          echo "### Your dashboard is live: ${URL}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Share this link in your final project report. The first visit after a quiet spell takes ~10 seconds to wake up." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Smoke test (the page answers)
+        if: steps.gate.outputs.on == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="$(gcloud run services describe "${SERVICE_NAME}" --region="${REGION}" --format='value(status.url)')"
+          for attempt in 1 2 3 4 5 6; do
+            CODE="$(curl -s -o /dev/null -w '%{http_code}' "${URL}/_stcore/health" || true)"
+            echo "Health check ${attempt}: HTTP ${CODE}"
+            if [[ "${CODE}" == "200" ]]; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::The dashboard did not answer. Open the Cloud Run logs: gcloud run services logs read ${SERVICE_NAME} --region=${REGION} --limit=30"
+          exit 1
